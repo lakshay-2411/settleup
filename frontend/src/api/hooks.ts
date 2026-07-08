@@ -7,6 +7,8 @@ import type {
   Breakdown,
   Expense,
   Group,
+  ImportAnomaly,
+  ImportBatch,
   Membership,
   Settlement,
   Transfer,
@@ -148,6 +150,63 @@ export function useCreateSettlement(groupId: number) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settlements', groupId] })
       qc.invalidateQueries({ queryKey: ['balances', groupId] })
+    },
+  })
+}
+
+// --- Import -----------------------------------------------------------------
+
+export function useUploadImport(groupId: number) {
+  return useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return api<ImportBatch>(`/api/groups/${groupId}/imports/`, {
+        method: 'POST',
+        form,
+      })
+    },
+  })
+}
+
+export function useImportBatch(batchId: number | null) {
+  return useQuery({
+    queryKey: ['imports', batchId],
+    queryFn: () => api<ImportBatch>(`/api/imports/${batchId}/`),
+    enabled: batchId !== null,
+  })
+}
+
+export function useResolveAnomaly(batchId: number | null) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      anomalyId,
+      status,
+      resolution,
+    }: {
+      anomalyId: number
+      status: 'approved' | 'rejected'
+      resolution?: Record<string, unknown>
+    }) =>
+      api<ImportAnomaly>(`/api/imports/${batchId}/anomalies/${anomalyId}/`, {
+        method: 'PATCH',
+        body: { status, resolution_json: resolution ?? null },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['imports', batchId] }),
+  })
+}
+
+export function useCommitImport(groupId: number, batchId: number | null) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<ImportBatch>(`/api/imports/${batchId}/commit/`, { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['imports', batchId] })
+      qc.invalidateQueries({ queryKey: ['expenses', groupId] })
+      qc.invalidateQueries({ queryKey: ['balances', groupId] })
+      qc.invalidateQueries({ queryKey: ['settlements', groupId] })
+      qc.invalidateQueries({ queryKey: ['groups', groupId] })
     },
   })
 }
