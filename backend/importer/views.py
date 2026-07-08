@@ -1,4 +1,6 @@
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -6,10 +8,12 @@ from rest_framework.views import APIView
 
 from groups.views import user_groups
 
+from .committing import CommitBlocked, commit_batch
 from .detectors import run_detectors
-from .models import BatchStatus, ImportAnomaly, ImportBatch
+from .models import AnomalyStatus, BatchStatus, ImportAnomaly, ImportBatch
 from .pipeline import build_rows
-from .serializers import ImportBatchSerializer
+from .report import build_report, render_markdown
+from .serializers import ImportAnomalySerializer, ImportBatchSerializer
 
 
 class ImportUploadView(APIView):
@@ -51,10 +55,85 @@ class ImportUploadView(APIView):
         )
 
 
+def _get_batch(request, batch_id):
+    return get_object_or_404(
+        ImportBatch.objects.filter(group__in=user_groups(request.user)),
+        pk=batch_id,
+    )
+
+
 class ImportBatchDetailView(APIView):
     def get(self, request, batch_id):
-        batch = get_object_or_404(
-            ImportBatch.objects.filter(group__in=user_groups(request.user)),
-            pk=batch_id,
-        )
+        return Response(ImportBatchSerializer(_get_batch(request, batch_id)).data)
+
+
+class AnomalyResolveView(APIView):
+    """Approve or reject one pending anomaly (Meera's approval gate).
+    Body: {"status": "approved"|"rejected", "resolution_json": {...}?}"""
+
+    def patch(self, request, batch_id, anomaly_id):
+        batch = _get_batch(request, batch_id)
+        if batch.status != BatchStatus.AWAITING_APPROVAL:
+            return Response(
+                {"detail": "batch is already committed"},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+        anomaly = get_object_or_404(batch.anomalies, pk=anomaly_id)
+        if anomaly.status == AnomalyStatus.AUTO_APPLIED:
+            return Response(
+                {"detail": "auto-applied anomalies are informational; nothing to decide"},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        decision = request.data.get("status")
+        if decision not in (AnomalyStatus.APPROVED, AnomalyStatus.REJECTED):
+            return Response(
+                {"detail": "status must be 'approved' or 'rejected'"},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        anomaly.status = decision
+        anomaly.resolution_json = request.data.get("resolution_json")
+        anomaly.resolved_by = request.user
+        anomaly.resolved_at = timezone.now()
+        anomaly.save()
+        return Response(ImportAnomalySerializer(anomaly).data)
+
+
+class ImportCommitView(APIView):
+    """Apply approved (+auto) changes, write records, produce the report."""
+
+    def post(self, request, batch_id):
+        batch = _get_batch(request, batch_id)
+        if batch.status == BatchStatus.COMMITTED:
+            return Response(
+                {"detail": "batch already committed"},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+        try:
+            outcomes = commit_batch(batch, request.user)
+        except CommitBlocked as e:
+            return Response({"detail": str(e)}, status=http_status.HTTP_409_CONFLICT)
+
+        batch.report_json = build_report(batch, outcomes)
+        batch.save(update_fields=["status", "report_json"])
         return Response(ImportBatchSerializer(batch).data)
+
+
+class ImportReportView(APIView):
+    """The import report deliverable. ?format=md downloads Markdown."""
+
+    def get(self, request, batch_id):
+        batch = _get_batch(request, batch_id)
+        if not batch.report_json:
+            return Response(
+                {"detail": "batch not committed yet — no report"},
+                status=http_status.HTTP_404_NOT_FOUND,
+            )
+        if request.query_params.get("format") == "md":
+            md = render_markdown(batch.report_json)
+            response = HttpResponse(md, content_type="text/markdown; charset=utf-8")
+            response["Content-Disposition"] = (
+                f'attachment; filename="import-report-{batch.id}.md"'
+            )
+            return response
+        return Response(batch.report_json)

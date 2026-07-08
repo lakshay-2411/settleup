@@ -61,7 +61,8 @@ def create_expense(
         fx_rate=fx_rate,
         fx_rate_date=fx_date,
         split_type=split_type,
-        split_raw=split_details,
+        # JSON column: keep the raw details audit-readable, Decimals as strings
+        split_raw={k: str(v) for k, v in split_details.items()} if split_details else None,
         notes=notes,
         status=status,
         is_refund=is_refund,
