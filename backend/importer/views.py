@@ -6,7 +6,8 @@ from rest_framework.views import APIView
 
 from groups.views import user_groups
 
-from .models import BatchStatus, ImportBatch
+from .detectors import run_detectors
+from .models import BatchStatus, ImportAnomaly, ImportBatch
 from .pipeline import build_rows
 from .serializers import ImportBatchSerializer
 
@@ -32,6 +33,8 @@ class ImportUploadView(APIView):
         except ValueError as e:
             return Response({"detail": str(e)}, status=http_status.HTTP_400_BAD_REQUEST)
 
+        anomalies = run_detectors(rows, group)
+
         batch = ImportBatch.objects.create(
             group=group,
             uploaded_by=request.user,
@@ -39,6 +42,9 @@ class ImportUploadView(APIView):
             total_rows=len(rows),
             status=BatchStatus.AWAITING_APPROVAL,
             rows_json=rows,
+        )
+        ImportAnomaly.objects.bulk_create(
+            ImportAnomaly(batch=batch, **a) for a in anomalies
         )
         return Response(
             ImportBatchSerializer(batch).data, status=http_status.HTTP_201_CREATED
