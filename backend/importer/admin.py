@@ -1,3 +1,6 @@
 from django.contrib import admin
 
-# Register your models here.
+from .models import ImportAnomaly, ImportBatch
+
+admin.site.register(ImportBatch)
+admin.site.register(ImportAnomaly)

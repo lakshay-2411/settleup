@@ -11,8 +11,12 @@ from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load backend/.env if present (local dev); real deployments set env vars directly.
+load_dotenv(BASE_DIR / ".env")
 
 # --- Core -------------------------------------------------------------------
 
@@ -85,6 +89,8 @@ DATABASES = {
 }
 
 # --- Auth -------------------------------------------------------------------
+
+AUTH_USER_MODEL = "accounts.User"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
