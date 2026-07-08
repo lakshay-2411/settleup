@@ -27,7 +27,7 @@ export default function GroupDetailPage() {
         {tabs.map((t) => (
           <NavLink
             key={t.to}
-            to={t.to}
+            to={`/groups/${id}/${t.to}`}
             className={({ isActive }) =>
               `px-4 py-2 text-sm font-medium rounded-t-lg ${
                 isActive
