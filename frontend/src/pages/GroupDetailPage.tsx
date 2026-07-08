@@ -1,5 +1,6 @@
 import { NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { useGroup } from '../api/hooks'
+import BalancesTab from '../components/BalancesTab'
 import ExpensesTab from '../components/ExpensesTab'
 import MembersTab from '../components/MembersTab'
 
@@ -41,7 +42,7 @@ export default function GroupDetailPage() {
       <Routes>
         <Route index element={<Navigate to="expenses" replace />} />
         <Route path="expenses" element={<ExpensesTab group={group} />} />
-        <Route path="balances" element={<p className="text-slate-500">Balances coming up.</p>} />
+        <Route path="balances" element={<BalancesTab group={group} />} />
         <Route path="members" element={<MembersTab group={group} />} />
         <Route path="import" element={<p className="text-slate-500">Import coming up.</p>} />
       </Routes>

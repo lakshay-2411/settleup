@@ -2,7 +2,15 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from './client'
-import type { Expense, Group, Membership } from '../types'
+import type {
+  BalanceRow,
+  Breakdown,
+  Expense,
+  Group,
+  Membership,
+  Settlement,
+  Transfer,
+} from '../types'
 
 // --- Groups -------------------------------------------------------------
 
@@ -90,6 +98,55 @@ export function useDeleteExpense(groupId: number) {
       api(`/api/expenses/${expenseId}/`, { method: 'DELETE' }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['expenses', groupId] })
+      qc.invalidateQueries({ queryKey: ['balances', groupId] })
+    },
+  })
+}
+
+// --- Balances & settlements ----------------------------------------------
+
+export function useBalances(groupId: number) {
+  return useQuery({
+    queryKey: ['balances', groupId],
+    queryFn: () => api<BalanceRow[]>(`/api/groups/${groupId}/balances/`),
+  })
+}
+
+export function useSimplifiedBalances(groupId: number) {
+  return useQuery({
+    queryKey: ['balances', groupId, 'simplified'],
+    queryFn: () => api<Transfer[]>(`/api/groups/${groupId}/balances/simplified/`),
+  })
+}
+
+export function useBreakdown(groupId: number, personId: number | null) {
+  return useQuery({
+    queryKey: ['balances', groupId, 'breakdown', personId],
+    queryFn: () => api<Breakdown>(`/api/groups/${groupId}/balances/${personId}/breakdown/`),
+    enabled: personId !== null,
+  })
+}
+
+export function useSettlements(groupId: number) {
+  return useQuery({
+    queryKey: ['settlements', groupId],
+    queryFn: () => api<Settlement[]>(`/api/groups/${groupId}/settlements/`),
+  })
+}
+
+export function useCreateSettlement(groupId: number) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: {
+      date: string
+      from_person_name: string
+      to_person_name: string
+      original_amount: string
+      original_currency: string
+      notes?: string
+    }) => api<Settlement>(`/api/groups/${groupId}/settlements/`, { method: 'POST', body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settlements', groupId] })
       qc.invalidateQueries({ queryKey: ['balances', groupId] })
     },
   })
