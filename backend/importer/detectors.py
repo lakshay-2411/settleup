@@ -233,13 +233,14 @@ def _missing_payer(ctx):
     for row in ctx["rows"]:
         if row["action"] == "expense" and row["parsed"]["payer_kind"] == "empty":
             row["status"] = "needs_input"
+            candidates = [x["name"] for x in row["parsed"]["participants"]]
             ctx["anomalies"].append(_anomaly(
                 [row["row"]], "MISSING_PAYER", "blocking", PENDING,
                 f"Row {row['row']} ({row['parsed']['description']!r}) has no payer"
                 + (f" — note: {row['parsed']['notes']!r}." if row["parsed"]["notes"] else "."),
                 "Cannot guess who paid. Import held as NEEDS_INPUT (excluded from "
                 "balances) until a payer is supplied in the review step.",
-                before={"paid_by": ""}, after=None,
+                before={"paid_by": ""}, after={"candidates": candidates},
             ))
             _tag(row, len(ctx["anomalies"]) - 1)
 
@@ -450,11 +451,15 @@ def _alias_names(ctx):
                 _tag(row, len(ctx["anomalies"]) - 1)
 
 
-def _departed_members(ctx):
-    """A split that includes someone whose membership window doesn't cover the
-    expense date (Meera listed on an April expense after leaving in March)."""
-    windows = ctx["windows"]
-    for row in ctx["rows"]:
+def departed_member_anomalies(rows, windows):
+    """
+    Core of the window check, shared by the initial run and re-analysis:
+    for every expense row, flag participants whose membership window does not
+    cover the expense date. Pure: rows + {name: (joined, left)} in, list of
+    (row, anomaly_dict) out.
+    """
+    found = []
+    for row in rows:
         p = row["parsed"]
         if row["action"] != "expense" or not p["date"]:
             continue
@@ -463,14 +468,13 @@ def _departed_members(ctx):
         for part in p["participants"]:
             win = windows.get(part["name"])
             if win is None:
-                continue  # unknown people are handled by _unknown_people
+                continue  # people with no window are handled by _unknown_people
             joined, left = win
             if d < joined or (left is not None and d > left):
                 stale.append(part["name"])
         if stale:
-            row["status"] = "pending_approval"
             remaining = [x["name"] for x in p["participants"] if x["name"] not in stale]
-            ctx["anomalies"].append(_anomaly(
+            found.append((row, _anomaly(
                 [row["row"]], "DEPARTED_MEMBER_IN_SPLIT", "warning", PENDING,
                 f"Row {row['row']} ({p['description']!r}, {p['date']}) includes "
                 f"{', '.join(stale)}, whose membership does not cover that date"
@@ -480,5 +484,62 @@ def _departed_members(ctx):
                 "listed in the file.",
                 before={"participants": [x["name"] for x in p["participants"]]},
                 after={"participants": remaining, "dropped": stale},
-            ))
-            _tag(row, len(ctx["anomalies"]) - 1)
+            )))
+    return found
+
+
+def _departed_members(ctx):
+    """A split that includes someone whose membership window doesn't cover the
+    expense date (Meera listed on an April expense after leaving in March)."""
+    for row, anomaly in departed_member_anomalies(ctx["rows"], ctx["windows"]):
+        row["status"] = "pending_approval"
+        ctx["anomalies"].append(anomaly)
+        _tag(row, len(ctx["anomalies"]) - 1)
+
+
+def resolved_person_windows(batch):
+    """
+    Membership windows supplied during the review step: for every APPROVED
+    unknown-person anomaly, the user's resolution (role + joined/left dates)
+    or, failing that, the default appearance-span window.
+    """
+    windows = {}
+    for a in batch.anomalies.filter(
+        anomaly_type="NON_MEMBER_PARTICIPANT", status="approved"
+    ):
+        name = a.after_json["create_guest"]
+        res = a.resolution_json or {}
+        default = a.after_json.get("window") or [None, None]
+        joined = res.get("joined_on") or default[0]
+        # left_on is meaningful even when null ("member, still here"), so only
+        # fall back to the default when the key is absent entirely.
+        left = res["left_on"] if "left_on" in res else default[1]
+        if joined is None:
+            continue  # no dated appearances and no user input: nothing to check
+        windows[name] = (
+            date.fromisoformat(joined),
+            date.fromisoformat(left) if left else None,
+        )
+    return windows
+
+
+def reanalyze_departed(batch, group):
+    """
+    Phase-2 re-check: once every people decision is in, run the window check
+    again with roster windows + the windows the user just supplied. Returns
+    only anomalies not already recorded on the batch (idempotent).
+    """
+    windows = {
+        m.person.name: (m.joined_on, m.left_on)
+        for m in group.memberships.select_related("person")
+    }
+    windows.update(resolved_person_windows(batch))
+
+    existing = {
+        (a.anomaly_type, tuple(a.source_row_numbers)) for a in batch.anomalies.all()
+    }
+    return [
+        anomaly
+        for _row, anomaly in departed_member_anomalies(batch.rows_json, windows)
+        if (anomaly["anomaly_type"], tuple(anomaly["source_row_numbers"])) not in existing
+    ]

@@ -72,19 +72,31 @@ def commit_batch(batch, user):
         if a.anomaly_type == "NON_MEMBER_PARTICIPANT" and _decided(a):
             name = a.after_json["create_guest"]
             if a.status == AnomalyStatus.APPROVED:
-                window = a.after_json["window"]
+                # The review step may have refined who this person is: full
+                # member vs guest, and their real join/leave dates. Fall back
+                # to the appearance-span window proposed by the detector.
+                res = a.resolution_json or {}
+                default = a.after_json.get("window") or [None, None]
+                role = res.get("role", Membership.ROLE_GUEST)
+                joined = res.get("joined_on") or default[0]
+                left = res["left_on"] if "left_on" in res else default[1]
+
                 person, _ = Person.objects.get_or_create(
-                    name=name, defaults={"is_guest": True}
+                    name=name, defaults={"is_guest": role == Membership.ROLE_GUEST}
                 )
-                Membership.objects.get_or_create(
-                    group=group,
-                    person=person,
-                    defaults={
-                        "joined_on": date_cls.fromisoformat(window[0]),
-                        "left_on": date_cls.fromisoformat(window[1]),
-                        "role": Membership.ROLE_GUEST,
-                    },
-                )
+                if person.is_guest != (role == Membership.ROLE_GUEST):
+                    person.is_guest = role == Membership.ROLE_GUEST
+                    person.save(update_fields=["is_guest"])
+                if joined:
+                    Membership.objects.get_or_create(
+                        group=group,
+                        person=person,
+                        defaults={
+                            "joined_on": date_cls.fromisoformat(joined),
+                            "left_on": date_cls.fromisoformat(left) if left else None,
+                            "role": role,
+                        },
+                    )
                 people[name] = person
             else:
                 excluded_people.add(name)

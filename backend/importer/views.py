@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from groups.views import user_groups
 
 from .committing import CommitBlocked, commit_batch
-from .detectors import run_detectors
+from .detectors import reanalyze_departed, run_detectors
 from .models import AnomalyStatus, BatchStatus, ImportAnomaly, ImportBatch
 from .pipeline import build_rows
 from .report import build_report, render_markdown
@@ -96,7 +96,30 @@ class AnomalyResolveView(APIView):
         anomaly.resolved_by = request.user
         anomaly.resolved_at = timezone.now()
         anomaly.save()
+
+        self._maybe_reanalyze(batch, anomaly)
         return Response(ImportAnomalySerializer(anomaly).data)
+
+    # Types whose decisions establish who a person is (and when they lived here).
+    PEOPLE_TYPES = ("NON_MEMBER_PARTICIPANT", "NAME_ALIAS_AMBIGUOUS")
+
+    def _maybe_reanalyze(self, batch, anomaly):
+        """Two-phase review: the moment the LAST people decision lands, re-run
+        the window-dependent checks with the freshly supplied membership
+        windows — anomalies invisible at upload time (empty roster) surface now."""
+        if batch.reanalyzed or anomaly.anomaly_type not in self.PEOPLE_TYPES:
+            return
+        still_open = batch.anomalies.filter(
+            status=AnomalyStatus.PENDING_APPROVAL, anomaly_type__in=self.PEOPLE_TYPES
+        ).exists()
+        if still_open:
+            return
+        new_anomalies = reanalyze_departed(batch, batch.group)
+        ImportAnomaly.objects.bulk_create(
+            ImportAnomaly(batch=batch, **a) for a in new_anomalies
+        )
+        batch.reanalyzed = True
+        batch.save(update_fields=["reanalyzed"])
 
 
 class ImportCommitView(APIView):

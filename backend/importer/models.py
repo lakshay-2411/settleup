@@ -63,6 +63,9 @@ class ImportBatch(models.Model):
     )
     rows_json = models.JSONField(default=list)  # normalized rows + proposed actions
     report_json = models.JSONField(null=True, blank=True)  # final import report
+    # Two-phase review: set once the window-dependent checks have been re-run
+    # after all people decisions were made (so it happens exactly once).
+    reanalyzed = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-uploaded_at"]
