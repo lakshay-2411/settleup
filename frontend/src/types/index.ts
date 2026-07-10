@@ -160,6 +160,7 @@ export interface ImportBatch {
   uploaded_at: string
   total_rows: number
   status: 'parsing' | 'awaiting_approval' | 'committed'
+  reanalyzed?: boolean
   rows_json: ImportRow[]
   report_json: ImportReport | null
   anomalies: ImportAnomaly[]
