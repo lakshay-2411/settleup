@@ -12,7 +12,7 @@ from .committing import CommitBlocked, commit_batch
 from .detectors import reanalyze_departed, run_detectors
 from .models import AnomalyStatus, BatchStatus, ImportAnomaly, ImportBatch
 from .pipeline import build_rows
-from .report import build_report, render_markdown
+from .report import build_report, render_markdown, render_pdf
 from .serializers import ImportAnomalySerializer, ImportBatchSerializer
 
 
@@ -143,7 +143,7 @@ class ImportCommitView(APIView):
 
 
 class ImportReportView(APIView):
-    """The import report deliverable. ?format=md downloads Markdown."""
+    """The import report deliverable. ?format=md or ?format=pdf downloads it."""
 
     def get(self, request, batch_id):
         batch = _get_batch(request, batch_id)
@@ -152,11 +152,19 @@ class ImportReportView(APIView):
                 {"detail": "batch not committed yet — no report"},
                 status=http_status.HTTP_404_NOT_FOUND,
             )
-        if request.query_params.get("format") == "md":
+        fmt = request.query_params.get("format")
+        if fmt == "md":
             md = render_markdown(batch.report_json)
             response = HttpResponse(md, content_type="text/markdown; charset=utf-8")
             response["Content-Disposition"] = (
                 f'attachment; filename="import-report-{batch.id}.md"'
+            )
+            return response
+        if fmt == "pdf":
+            pdf = render_pdf(batch.report_json)
+            response = HttpResponse(pdf, content_type="application/pdf")
+            response["Content-Disposition"] = (
+                f'attachment; filename="import-report-{batch.id}.pdf"'
             )
             return response
         return Response(batch.report_json)
