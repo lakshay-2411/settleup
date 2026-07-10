@@ -17,8 +17,8 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from expenses.models import Expense, ExpenseStatus, Settlement
-from expenses.services import convert_to_inr, create_expense
+from expenses.models import ExchangeRate, Expense, ExpenseStatus, ExpenseShare, Settlement
+from expenses.splits import resolve_split, round_money
 from groups.models import Membership, Person
 
 from .models import AnomalyStatus, BatchStatus
@@ -204,8 +204,33 @@ def commit_batch(batch, user):
             st["status"] = "needs_input"
             st["hold_reason"] = "payer was a rejected guest"
 
-    # --- Write records in file order -----------------------------------------
+    # --- Write records in three bulk statements ------------------------------
+    # Against a remote Postgres every statement costs a full network round trip
+    # (~190 ms to Supabase — measured), so per-row writes made a 42-row commit
+    # take ~33 s (173 queries, half of them SAVEPOINTs from nested atomics).
+    # Instead: resolve everything in memory — the split math in
+    # expenses/splits.py is pure — then write one bulk insert for expenses, one
+    # for their shares, one for settlements. Same rows, same one outer
+    # transaction, ~15 queries total.
+    fx_cache: dict[str, ExchangeRate] = {}
+
+    def to_inr(amount: Decimal, currency: str):
+        """convert_to_inr, but the rate row is fetched once per batch."""
+        if currency == "INR":
+            return round_money(amount), None, None
+        if currency not in fx_cache:
+            rate_row = ExchangeRate.objects.filter(base="INR", quote=currency).first()
+            if rate_row is None:
+                raise ValueError(f"no exchange rate configured for {currency}")
+            fx_cache[currency] = rate_row
+        rate_row = fx_cache[currency]
+        return round_money(amount * rate_row.rate), rate_row.rate, rate_row.as_of
+
     outcomes = {}
+    # (row_n, unsaved Expense, [(person, share, weight)] | None, hold_reason)
+    staged_expenses = []
+    staged_settlements = []  # (row_n, unsaved Settlement)
+
     for n in sorted(rows):
         st = state[n]
         parsed = rows[n]["parsed"]
@@ -219,21 +244,20 @@ def commit_batch(batch, user):
         d = date_cls.fromisoformat(st["date"])
 
         if st["action"] == "settlement" and st["status"] == "active":
-            amount_inr, fx_rate, _ = convert_to_inr(amount, currency)
-            settlement = Settlement.objects.create(
+            amount_inr, fx_rate, _ = to_inr(amount, currency)
+            staged_settlements.append((n, Settlement(
                 group=group,
                 date=d,
                 from_person=people[st["payer"]],
                 to_person=people[st["participants"][0]],
-                original_amount=amount,
+                original_amount=round_money(amount),
                 original_currency=currency,
                 amount_inr=amount_inr,
                 fx_rate=fx_rate,
                 notes=parsed["notes"],
                 source_import=batch,
                 source_row_number=n,
-            )
-            outcomes[n] = {"outcome": "settlement", "id": settlement.id}
+            )))
             continue
 
         participants = [people[p] for p in st["participants"] if p in people]
@@ -244,40 +268,61 @@ def commit_batch(batch, user):
             status = "needs_input"
             st["hold_reason"] = st["hold_reason"] or "payer/participants missing"
 
+        amount_inr, fx_rate, fx_date = to_inr(amount, currency)
+        details = (
+            {k: Decimal(str(v)) for k, v in st["split_details"].items()}
+            if st["split_details"]
+            else None
+        )
+        split_type = st["split_type"] or "equal"
+
+        share_pairs = None
         if status == "active":
-            details = (
-                {k: Decimal(v) for k, v in st["split_details"].items()}
-                if st["split_details"]
-                else None
-            )
-            expense = create_expense(
-                group=group, date=d, description=parsed["description"],
-                payer=payer, original_amount=amount, original_currency=currency,
-                split_type=st["split_type"] or "equal",
-                participants=participants, split_details=details,
-                notes=parsed["notes"], status=ExpenseStatus.ACTIVE,
-                is_refund=st["is_refund"], source_import=batch,
-                source_row_number=n, created_by=user,
-            )
-            outcomes[n] = {"outcome": "expense_active", "id": expense.id}
-        else:
-            # Held / void / superseded rows: stored for audit, no shares, so
-            # they can never leak into balances.
-            amount_inr, fx_rate, fx_date = convert_to_inr(amount, currency)
-            expense = Expense.objects.create(
-                group=group, date=d, description=parsed["description"],
-                payer=payer, original_amount=amount, original_currency=currency,
-                amount_inr=amount_inr, fx_rate=fx_rate, fx_rate_date=fx_date,
-                split_type=st["split_type"] or "equal",
-                split_raw=st["split_details"], notes=parsed["notes"],
-                status=status, is_refund=st["is_refund"], source_import=batch,
-                source_row_number=n, created_by=user,
-            )
-            outcomes[n] = {
-                "outcome": f"expense_{status}",
-                "id": expense.id,
-                **({"reason": st["hold_reason"]} if st["hold_reason"] else {}),
-            }
+            # Mirror expenses/services._create_shares, in memory.
+            by_name = {p.name: p for p in participants}
+            if split_type == "equal":
+                shares = resolve_split("equal", amount_inr, list(by_name))
+                weights: dict = {}
+            else:
+                dd = details or {}
+                if split_type == "unequal" and currency != "INR":
+                    # unequal parts are given in the original currency
+                    dd = {k: to_inr(v, currency)[0] for k, v in dd.items()}
+                shares = resolve_split(split_type, amount_inr, list(by_name), dd)
+                weights = dd
+            share_pairs = [
+                (by_name[name], share, weights.get(name)) for name, share in shares.items()
+            ]
+
+        staged_expenses.append((n, Expense(
+            group=group, date=d, description=parsed["description"],
+            payer=payer, original_amount=round_money(amount),
+            original_currency=currency,
+            amount_inr=amount_inr, fx_rate=fx_rate, fx_rate_date=fx_date,
+            split_type=split_type,
+            split_raw={k: str(v) for k, v in details.items()} if details else None,
+            notes=parsed["notes"], status=status, is_refund=st["is_refund"],
+            source_import=batch, source_row_number=n, created_by=user,
+        ), share_pairs, st["hold_reason"]))
+
+    # Three round trips instead of one per row.
+    Expense.objects.bulk_create([e for _, e, _, _ in staged_expenses])
+    ExpenseShare.objects.bulk_create(
+        ExpenseShare(expense=e, person=person, share_amount_inr=share, weight=weight)
+        for _, e, pairs, _ in staged_expenses
+        if pairs
+        for person, share, weight in pairs
+    )
+    Settlement.objects.bulk_create([s for _, s in staged_settlements])
+
+    for n, e, _pairs, hold in staged_expenses:
+        outcomes[n] = {
+            "outcome": f"expense_{e.status}",
+            "id": e.id,
+            **({"reason": hold} if hold and e.status != ExpenseStatus.ACTIVE else {}),
+        }
+    for n, s in staged_settlements:
+        outcomes[n] = {"outcome": "settlement", "id": s.id}
 
     batch.status = BatchStatus.COMMITTED
     return outcomes
