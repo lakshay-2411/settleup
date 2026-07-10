@@ -39,6 +39,14 @@ are 1-indexed data rows (header excluded). Detectors live in
 **Import outcome for the provided file (default decisions):** 42 rows → 37 active expenses,
 2 superseded duplicates, 1 void, 2 settlements. 24 anomaly records across 18 types.
 
+**Two-phase review.** People decisions (`NON_MEMBER_PARTICIPANT`, `NAME_ALIAS_AMBIGUOUS`)
+are made first — each unknown person gets a role (member/guest) and join/leave dates. The
+moment the last people decision lands, the window-dependent check (#20) re-runs against
+the supplied dates, so importing into an *empty* group still catches a departed member on
+a later expense — if the user enters the real leave date, which the file alone cannot
+provide. Missing-payer anomalies (#7) offer the row's own participants as payer
+candidates, since whoever paid must be one of the people the cost was split among.
+
 ## Part 2: Database schema
 
 PostgreSQL via Django ORM. Money columns are `DECIMAL(12,2)`; FX rates `DECIMAL(12,6)`.
@@ -85,7 +93,8 @@ importer_importbatch          one import run (dry-run until committed)
   id, group_id, uploaded_by_id, uploaded_at, filename, total_rows
   status ('parsing'|'awaiting_approval'|'committed')
   rows_json JSONB (normalized rows + proposed actions)
-  report_json JSONB (the import report)
+  report_json JSONB (the import report — PDF/Markdown are rendered from this on demand)
+  reanalyzed BOOL (window checks re-run once, after the last people decision)
 
 importer_importanomaly        one detected problem + the decision made about it
   id, batch_id → importer_importbatch, anomaly_type, severity ('info'|'warning'|'blocking')

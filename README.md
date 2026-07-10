@@ -2,8 +2,8 @@
 
 A shared-expenses web app for a flat whose membership changes over time. Tracks group
 expenses across currencies, computes who-owes-whom balances with full drill-down, records
-settlements, and imports a messy spreadsheet export through an anomaly-detecting import
-pipeline where every destructive change requires explicit user approval.
+settlements, and imports a messy spreadsheet export through an anomaly-detecting,
+two-phase review where every destructive change requires explicit user approval.
 
 **Deployed app:** _URL to be added after deployment._
 
@@ -11,8 +11,8 @@ pipeline where every destructive change requires explicit user approval.
 
 | Layer | Tech |
 |---|---|
-| Frontend | React 19 + TypeScript (Vite), Tailwind CSS, TanStack Query, React Router |
-| Backend | Python, Django + Django REST Framework, JWT (simplejwt) |
+| Frontend | React 19 + TypeScript (Vite), Tailwind CSS v4, shadcn/ui, TanStack Query, React Router, motion, recharts |
+| Backend | Python, Django + Django REST Framework, JWT (simplejwt), fpdf2 |
 | Database | PostgreSQL (Supabase-hosted in production; SQLite fallback for local dev) |
 
 ## What's inside
@@ -20,16 +20,22 @@ pipeline where every destructive change requires explicit user approval.
 - **Login** — email + password, JWT access/refresh.
 - **Groups & membership windows** — members have `joined_on`/`left_on` dates; an expense
   only ever splits among people whose membership covers its date. Guests (trip visitors)
-  get date-bounded memberships.
-- **Expenses** — four split types (`equal`, `unequal`, `percentage`, `share`), multi-currency
-  with the original amount always preserved next to the INR conversion, refunds as negative
-  expenses.
-- **Balances** — per-person net positions, a minimal "who pays whom" settlement plan, and a
-  drill-down showing every row behind any number.
-- **Settlements** — record payments; pre-fillable from the suggested plan.
-- **CSV import** — parses the export exactly as provided, detects 18 types of data problems,
-  auto-applies only non-destructive normalizations, queues everything destructive for
-  approval, then produces a downloadable import report.
+  get date-bounded memberships. The People screen tells each group's membership story as
+  a timeline.
+- **Expenses** — four split types (`equal`, `unequal`, `percentage`, `share`),
+  multi-currency with the original amount always preserved next to the INR conversion,
+  refunds as negative expenses. Added through a full-screen, amount-first flow.
+- **Balances** — per-person net positions, a minimal "who pays whom" settlement plan, and
+  a receipts drill-down showing every row behind any number.
+- **Settlements** — record payments; pre-filled from the suggested plan.
+- **CSV import — a guided journey**: upload → scan → *who are these people?* (member or
+  guest, with join/leave dates) → a triage deck for the data findings (approve/reject one
+  at a time, keyboard included) → commit → report. The importer detects 18 types of data
+  problems, auto-applies only non-destructive normalizations (each one listed in a visible
+  log), re-runs the membership-window checks once the people decisions are in, and writes
+  nothing until commit — which lands in three bulk statements.
+- **Import report** — stored with the batch and downloadable as **PDF** (or Markdown/JSON
+  via the API): every anomaly, the policy, the user's decision, and each row's outcome.
 
 See `SCOPE.md` for the anomaly log and database schema, and `DECISIONS.md` for why things
 are the way they are.
@@ -58,18 +64,23 @@ cp .env.example .env        # VITE_API_URL defaults to http://localhost:8000
 npm run dev
 ```
 
-Open `http://localhost:5173`, register an account, create a group, add the members with
-their join/leave dates, then import the CSV from the group's **Import** tab.
+Open `http://localhost:5173` and register an account.
 
 ### Importing the provided export
 
-1. Create a group and add members with their real membership windows
-   (e.g. Meera left on 2026-03-31, Sam joined on 2026-04-08).
-2. Group → **Import** → upload `expenses_export.csv`.
-3. Review the detected anomalies: auto-applied normalizations are listed for transparency;
-   everything destructive waits in **Needs your decision**.
-4. Commit. The import report (JSON in-app, Markdown download) lists every anomaly and the
-   action taken.
+Two supported paths:
+
+1. **Members first (recommended):** create a group, add the flatmates with their real
+   join/leave dates (e.g. Meera left 2026-03-31, Sam joined 2026-04-08), then Import →
+   upload `expenses_export.csv`. All 18 anomaly types are detectable this way.
+2. **Import into an empty group:** upload straight away — everyone found in the file is
+   proposed to you in the *people* step, where you set member/guest and the join/leave
+   dates. The window checks re-run against the dates you enter, so problems like a
+   departed member on a later expense are still caught — provided you supply the real
+   leave date (the file alone cannot know it).
+
+Either way, nothing touches balances until you commit, and the report (PDF download)
+lists every anomaly and the action taken.
 
 ## AI used
 

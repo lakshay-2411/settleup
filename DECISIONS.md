@@ -124,3 +124,55 @@ Each significant decision, the options considered, and why the chosen one won.
   (Σ shares == total, Σ nets == 0) are asserted in production code paths
   (`check_integrity` runs on every balances read), and the full CSV import was verified
   end-to-end against the real file during the build.
+
+## D17. Two-phase import review: people first, then data
+
+- **Problem:** importing into an empty group made everyone a guest with an
+  appearance-span window, so the departed-member check (Meera on April groceries) could
+  never fire — the knowledge "she left March 31" isn't in the file.
+- **Options:** (a) require members to be added before importing; (b) ask who each unknown
+  person is *during* review and re-run the window checks against the answers.
+- **Chose (b).** The review has two phases: unknown people are confirmed first (member or
+  guest, join/leave dates — defaulting to *member*, since most people in a household
+  export are flatmates), and the moment the last people decision lands the backend
+  re-runs the window-dependent detectors once (`ImportBatch.reanalyzed` guards this).
+  Members-first still works identically. Honest limit, documented in `SCOPE.md`: if the
+  user accepts default dates instead of entering Meera's real leave date, that anomaly is
+  undetectable — no flow can extract knowledge that exists only in the user's head.
+
+## D18. Missing-payer candidates come from the row itself
+
+- The "who paid?" picker offers the row's own participants, not the group roster: whoever
+  paid a shared cost is by definition one of the people it was split among, and during
+  review the roster may not even contain the CSV's people yet (nothing is written until
+  commit).
+
+## D19. Commit writes in bulk — measured, not guessed
+
+- The original commit called `create_expense()` per row: 173 sequential queries, and at
+  the measured ~190 ms round trip to Supabase that meant ~33 s per commit. Nearly half
+  the queries were SAVEPOINT/RELEASE pairs from nested `transaction.atomic` calls.
+- **Fix:** resolve everything in memory (the split math in `splits.py` is pure), then
+  write one bulk insert each for expenses, shares, and settlements inside the same single
+  outer transaction, with the FX rate fetched once per batch. 18 queries, ~3 s locally,
+  sub-second when deployed next to the database. Outcomes verified byte-identical against
+  both golden import runs.
+
+## D20. The report is stored data; PDF/Markdown are renderings
+
+- `build_report()` writes the full report into `ImportBatch.report_json` once, at commit —
+  an immutable record of what the importer did, unaffected by later edits to expenses.
+- PDF (fpdf2, pure Python) and Markdown are rendered from that JSON on demand at download
+  time: one source of truth, no file storage, and adding a format never touches stored
+  data. PDF is the human-facing download; Markdown remains for the repo deliverable.
+
+## D21. Frontend: consumer money app, not an admin panel
+
+- The UI went through several full iterations (documented in `AI_USAGE.md`); the final
+  direction is a desktop-first product app: top-bar navigation, a money-view home with
+  one hero number, an activity feed instead of a ledger table, a full-screen amount-first
+  add-expense flow, and the import as a guided journey (scan → people → triage deck →
+  commit → report).
+- Built on shadcn/ui + Tailwind tokens (one teal accent swappable in two lines), with the
+  data layer (`api/`, `auth/`, `types/`) kept stable across every visual rebuild — pixels
+  changed four times; the tested plumbing never did.
